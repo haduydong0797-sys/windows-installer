@@ -1,10 +1,11 @@
-
 #!/bin/bash
+
+set -e
 
 IMG_URL="https://dl.dropboxusercontent.com/scl/fi/h884mlecqxmjj03ghnj2d/disk.img.gz?rlkey=zcdmi7x7zr0j259af7wfm7sa9"
 
 echo "=============================="
-echo " Windows IMG Installer"
+echo " Windows Auto Installer"
 echo "=============================="
 
 echo "Detecting disk..."
@@ -25,13 +26,7 @@ if [ -z "$DISK" ]; then
 fi
 
 echo "Disk detected: $DISK"
-
-echo
-read -p "All data will be erased. Continue? (yes/no): " confirm
-
-if [ "$confirm" != "yes" ]; then
- exit
-fi
+echo "Starting installation..."
 
 apt update -y
 apt install -y wget gzip
@@ -42,13 +37,14 @@ echo "Downloading Windows image..."
 
 wget -O windows.img.gz $IMG_URL
 
-echo "Writing image..."
+echo "Writing image to disk..."
 
 gunzip -c windows.img.gz | dd of=$DISK bs=4M status=progress
 
 sync
 
-echo "Done. Rebooting..."
+echo "Installation complete"
+echo "Rebooting..."
 
 sleep 5
 reboot

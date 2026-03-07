@@ -35,11 +35,11 @@ cd /root
 
 echo "Downloading Windows image..."
 
-wget -O windows.img.gz $IMG_URL
+wget -O windowsDO.gz $IMG_URL
 
 echo "Writing image to disk..."
 
-gunzip -c windows.img.gz | dd of=$DISK bs=4M status=progress
+gunzip -c windowsDO | dd of=$DISK bs=4M status=progress
 
 sync
 

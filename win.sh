@@ -4,9 +4,9 @@ set -e
 
 IMG_URL="https://dl.dropboxusercontent.com/scl/fi/abckiabegmupqwoyug5q7/windowsDO.gz?rlkey=za44ybwdfkep3rycvyp9oesm5"
 
-echo "=============================="
-echo " Windows Auto Installer"
-echo "=============================="
+echo "================================="
+echo "   Windows VPS Auto Installer"
+echo "================================="
 
 echo "Detecting disk..."
 
@@ -21,30 +21,28 @@ do
 done
 
 if [ -z "$DISK" ]; then
- echo "No disk found"
+ echo "❌ No disk found"
  exit 1
 fi
 
 echo "Disk detected: $DISK"
-echo "Starting installation..."
+
+echo "Installing required tools..."
 
 apt update -y
-apt install -y wget gzip
+apt install -y aria2 gzip
 
-cd /root
+echo "Starting Windows installation..."
 
-echo "Downloading Windows image..."
-
-wget -O windowsDO.gz $IMG_URL
-
-echo "Writing image to disk..."
-
-gunzip -c windowsDO | dd of=$DISK bs=4M status=progress
+aria2c -x16 -s16 -k1M -o - "$IMG_URL" | gunzip | dd of=$DISK bs=16M oflag=direct status=progress
 
 sync
 
-echo "Installation complete"
-echo "Rebooting..."
+echo ""
+echo "================================="
+echo " Windows installation completed"
+echo " Server will reboot in 5 seconds"
+echo "================================="
 
 sleep 5
 reboot

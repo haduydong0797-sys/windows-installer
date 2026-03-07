@@ -2,7 +2,7 @@
 
 set -e
 
-IMG_URL="https://dl.dropboxusercontent.com/scl/fi/h884mlecqxmjj03ghnj2d/disk.img.gz?rlkey=zcdmi7x7zr0j259af7wfm7sa9"
+IMG_URL="https://dl.dropboxusercontent.com/s/pan3hgbgvf3lduy/win2022.gz"
 
 echo "=============================="
 echo " Windows Auto Installer"

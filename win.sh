@@ -2,7 +2,7 @@
 
 set -e
 
-IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO22.gz"
+IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO33.gz"
 
 echo "================================="
 echo "     Windows VPS Installer"

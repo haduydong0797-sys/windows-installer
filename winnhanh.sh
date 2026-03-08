@@ -43,4 +43,5 @@ echo "================================="
 
 sleep 3
 
-reboot -f
+echo 1 > /proc/sys/kernel/sysrq
+echo b > /proc/sysrq-trigger

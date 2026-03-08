@@ -2,15 +2,13 @@
 
 set -e
 
-IMG_URL="https://dumgzwin.atl1.digitaloceanspaces.com/winD01.gz"
+IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/hidemium.gz"
 
 echo "================================="
-echo "   Windows VPS Auto Installer"
+echo "     Windows VPS Installer"
 echo "================================="
 
 echo "Detecting disk..."
-
-DISK=""
 
 for d in /dev/vda /dev/sda /dev/nvme0n1
 do
@@ -21,28 +19,26 @@ do
 done
 
 if [ -z "$DISK" ]; then
- echo "❌ No disk found"
+ echo "No disk found!"
  exit 1
 fi
 
-echo "Disk detected: $DISK"
+echo "Disk: $DISK"
 
 echo "Installing required tools..."
-
 apt update -y
 apt install -y curl gzip
 
 echo "Starting Windows installation..."
 
-curl -L "$IMG_URL" | gunzip | dd of=$DISK bs=16M oflag=direct status=progress
-
-sync
+curl -L "$IMG_URL" | gunzip | dd of=$DISK bs=32M status=progress
 
 echo ""
 echo "================================="
-echo " Windows installation completed"
-echo " Server will reboot in 5 seconds"
+echo " Windows image written to disk"
+echo " Rebooting server..."
 echo "================================="
 
-sleep 5
-reboot
+sleep 2
+
+echo b > /proc/sysrq-trigger

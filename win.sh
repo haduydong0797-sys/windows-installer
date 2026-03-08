@@ -2,7 +2,7 @@
 
 set -e
 
-IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winD01.gz"
+IMG_URL="https://dumgzwin.atl1.digitaloceanspaces.com/winD01.gz"
 
 echo "================================="
 echo "   Windows VPS Auto Installer"
@@ -30,11 +30,11 @@ echo "Disk detected: $DISK"
 echo "Installing required tools..."
 
 apt update -y
-apt install -y aria2 gzip
+apt install -y curl gzip
 
 echo "Starting Windows installation..."
 
-aria2c -x16 -s16 -k1M -o - "$IMG_URL" | gunzip | dd of=$DISK bs=16M oflag=direct status=progress
+curl -L "$IMG_URL" | gunzip | dd of=$DISK bs=16M oflag=direct status=progress
 
 sync
 

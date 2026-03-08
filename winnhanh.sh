@@ -2,7 +2,7 @@
 
 set -e
 
-IMG_URL="https://dumgzwin.atl1.digitaloceanspaces.com/winD01.gz"
+IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/hidemium.gz"
 
 echo "================================="
 echo "   Windows VPS Fast Installer"

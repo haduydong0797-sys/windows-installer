@@ -2,10 +2,10 @@
 
 set -e
 
-IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/hidemium.gz"
+IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO11.gz"
 
 echo "================================="
-echo "   Windows VPS Fast Installer"
+echo "     Windows VPS Installer"
 echo "================================="
 
 echo "Detecting disk..."
@@ -18,17 +18,29 @@ do
  fi
 done
 
-echo "Disk detected: $DISK"
+if [ -z "$DISK" ]; then
+ echo "No disk found!"
+ exit 1
+fi
 
+echo "Disk: $DISK"
+
+echo "Installing required tools..."
 apt update -y
 apt install -y curl gzip
 
-echo "Installing Windows..."
+echo "Starting Windows installation..."
 
 curl -L "$IMG_URL" | gunzip | dd of=$DISK bs=32M status=progress
 
-echo "Windows written to disk."
+sync
 
-echo "Rebooting..."
+echo ""
+echo "================================="
+echo " Windows image written to disk"
+echo " Rebooting server..."
+echo "================================="
+
+sleep 3
 
 reboot -f

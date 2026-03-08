@@ -2,7 +2,7 @@
 
 set -e
 
-IMG_URL="https://dl.dropboxusercontent.com/scl/fi/abckiabegmupqwoyug5q7/windowsDO.gz?rlkey=za44ybwdfkep3rycvyp9oesm5"
+IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winD01.gz"
 
 echo "================================="
 echo "   Windows VPS Auto Installer"

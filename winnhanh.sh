@@ -10,8 +10,6 @@ echo "================================="
 
 echo "Detecting disk..."
 
-DISK=""
-
 for d in /dev/vda /dev/sda /dev/nvme0n1
 do
  if [ -b "$d" ]; then
@@ -20,31 +18,17 @@ do
  fi
 done
 
-if [ -z "$DISK" ]; then
- echo "❌ No disk found"
- exit 1
-fi
-
 echo "Disk detected: $DISK"
-
-echo "Installing required tools..."
 
 apt update -y
 apt install -y curl gzip
 
-echo "---------------------------------"
-echo "Downloading and installing Windows..."
-echo "---------------------------------"
+echo "Installing Windows..."
 
-curl -L "$IMG_URL" | gunzip | dd of=$DISK bs=32M status=progress oflag=direct
+curl -L "$IMG_URL" | gunzip | dd of=$DISK bs=32M status=progress
 
-sync
+echo "Windows written to disk."
 
-echo ""
-echo "================================="
-echo " Windows installation completed"
-echo " Server will reboot in 5 seconds"
-echo "================================="
+echo "Rebooting..."
 
-sleep 5
-reboot
+reboot -f

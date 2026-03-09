@@ -1,49 +1,295 @@
-#!/bin/bash
-
+#!/usr/bin/env bash
 set -e
+
+#############################################
+# Windows VPS Installer
+# TinyInstaller-style
+#############################################
+
+VERSION="1.0"
 
 IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO99.gz"
 
-echo "================================="
-echo " Windows RAM Installer"
-echo "================================="
+WORKDIR="/tmp/wininst"
+MOUNT="/mnt/win"
+DISK=""
 
-echo "Installing required tools..."
-apt update -y
-apt install -y kexec-tools curl gzip
+#############################################
+# UI
+#############################################
 
-echo "Detecting disk..."
+banner() {
 
-DISK=$(lsblk -ndo NAME,TYPE | awk '$2=="disk"{print "/dev/"$1}' | head -n1)
+echo "======================================"
+echo " Windows VPS Installer $VERSION"
+echo " TinyInstaller-style script"
+echo "======================================"
+
+}
+
+#############################################
+# Detect disk
+#############################################
+
+detect_disk() {
+
+echo "[*] Detecting system disk..."
+
+DISK=$(lsblk -dpno NAME,TYPE | awk '$2=="disk"{print $1}' | head -n1)
 
 if [ -z "$DISK" ]; then
- echo "No disk found!"
- exit 1
+    echo "No disk detected"
+    exit 1
 fi
 
-echo "Target disk: $DISK"
+echo "[OK] Disk detected: $DISK"
 
-echo "Loading kernel into RAM..."
+}
 
-kexec -l /boot/vmlinuz-$(uname -r) \
---initrd=/boot/initrd.img-$(uname -r) \
---command-line="$(cat /proc/cmdline) rdinit=/bin/bash"
+#############################################
+# Stop services
+#############################################
 
-echo "Booting RAM kernel..."
-kexec -e
+stop_services() {
 
-echo "Mounting RAM filesystem..."
+echo "[*] Disabling swap"
 
-mount -t tmpfs tmpfs /mnt
-cd /mnt
+swapoff -a || true
 
-echo "Downloading and writing Windows image..."
+echo "[*] Killing disk processes"
 
-curl -L "$IMG_URL" | gunzip | dd of=$DISK bs=16M status=progress
+fuser -km $DISK || true
 
-echo "Syncing disk..."
+}
+
+#############################################
+# Unmount partitions
+#############################################
+
+unmount_disk() {
+
+echo "[*] Unmounting partitions"
+
+lsblk -ln $DISK | awk '{print $1}' | while read part; do
+    umount "/dev/$part" 2>/dev/null || true
+done
+
+}
+
+#############################################
+# Detect network
+#############################################
+
+detect_network() {
+
+echo "[*] Detecting network..."
+
+IP=$(ip -4 addr show scope global | grep inet | head -n1 | awk '{print $2}')
+IPADDR=$(echo $IP | cut -d/ -f1)
+CIDR=$(echo $IP | cut -d/ -f2)
+
+GW=$(ip route | grep default | awk '{print $3}' | head -n1)
+
+DNS=$(grep nameserver /etc/resolv.conf | head -n1 | awk '{print $2}')
+
+if [ -z "$DNS" ]; then
+DNS="8.8.8.8"
+fi
+
+MASK=$(cidr_to_mask $CIDR)
+
+echo "IP: $IPADDR"
+echo "MASK: $MASK"
+echo "GW: $GW"
+echo "DNS: $DNS"
+
+}
+
+#############################################
+# CIDR -> NETMASK
+#############################################
+
+cidr_to_mask() {
+
+local i mask=""
+local full_octets=$(($1/8))
+local partial_octet=$(($1%8))
+
+for ((i=0;i<4;i++)); do
+if [ $i -lt $full_octets ]; then
+mask+=255
+elif [ $i -eq $full_octets ]; then
+mask+=$((256-2**(8-$partial_octet)))
+else
+mask+=0
+fi
+test $i -lt 3 && mask+=.
+done
+
+echo $mask
+
+}
+
+#############################################
+# Download Windows image
+#############################################
+
+download_image() {
+
+echo "[*] Downloading Windows image..."
+
+mkdir -p $WORKDIR
+cd $WORKDIR
+
+curl -L "$IMG_URL" -o win.gz
+
+echo "[OK] Download finished"
+
+}
+
+#############################################
+# Write disk
+#############################################
+
+write_disk() {
+
+echo "[*] Writing image to disk..."
+
+gunzip -c win.gz | dd of=$DISK bs=16M status=progress conv=fsync
+
 sync
 
-echo "Rebooting into Windows..."
+echo "[OK] Image written"
+
+}
+
+#############################################
+# Mount Windows
+#############################################
+
+mount_windows() {
+
+echo "[*] Mounting Windows partition..."
+
+mkdir -p $MOUNT
+
+mount ${DISK}2 $MOUNT 2>/dev/null || mount ${DISK}1 $MOUNT
+
+}
+
+#############################################
+# Inject network config
+#############################################
+
+inject_network() {
+
+echo "[*] Injecting network config..."
+
+cat <<EOF > $MOUNT/netconfig.txt
+IP=$IPADDR
+MASK=$MASK
+GW=$GW
+DNS=$DNS
+PASS=Admin$(date +%s | tail -c 6)
+EOF
+
+}
+
+#############################################
+# Windows boot script
+#############################################
+
+install_windows_script() {
+
+echo "[*] Installing Windows first boot script..."
+
+mkdir -p $MOUNT/Windows/Setup/Scripts
+
+cat <<'EOF' > $MOUNT/Windows/Setup/Scripts/SetupComplete.cmd
+@echo off
+
+set CONFIG=C:\netconfig.txt
+
+for /f "tokens=1,2 delims==" %%a in (%CONFIG%) do (
+ set %%a=%%b
+)
+
+net user Administrator %PASS%
+
+netsh interface ip set address "Ethernet" static %IP% %MASK% %GW%
+
+netsh interface ip set dns "Ethernet" static %DNS%
+
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
+
+netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
+
+exit
+EOF
+
+}
+
+#############################################
+# Expand disk
+#############################################
+
+expand_disk_script() {
+
+echo "[*] Adding auto disk expand..."
+
+cat <<'EOF' > $MOUNT/expand.ps1
+$res = Get-Partition -DriveLetter C
+Resize-Partition -DriveLetter C -Size $res.SizeMax
+EOF
+
+}
+
+#############################################
+# Cleanup
+#############################################
+
+cleanup() {
+
+echo "[*] Cleaning up..."
+
+umount $MOUNT || true
+
+rm -rf $WORKDIR || true
+
+}
+
+#############################################
+# Reboot
+#############################################
+
+reboot_system() {
+
+echo ""
+echo "================================"
+echo " Installation completed"
+echo " Windows will boot now"
+echo "================================"
+
+sleep 3
 
 reboot -f
+
+}
+
+#############################################
+# MAIN
+#############################################
+
+banner
+detect_disk
+stop_services
+unmount_disk
+detect_network
+download_image
+write_disk
+mount_windows
+inject_network
+install_windows_script
+expand_disk_script
+cleanup
+reboot_system

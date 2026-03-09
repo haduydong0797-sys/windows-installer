@@ -1,20 +1,11 @@
 #!/usr/bin/env bash
-set -eo pipefail
+set -e
 
 IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO2222.gz"
-WORK="/tmp/winram"
+TMP="/dev/shm/winimage.gz"
 MOUNT="/mnt/win"
 
 log(){ echo "[+] $*"; }
-
-################################
-# Wait apt lock
-################################
-
-while fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
-  log "Waiting for apt lock..."
-  sleep 2
-done
 
 ################################
 # Detect disk
@@ -32,8 +23,6 @@ log "Target disk: $DISK"
 ################################
 # Detect network
 ################################
-
-log "Detecting network..."
 
 ROUTE=$(ip -4 route get 1.1.1.1)
 
@@ -77,123 +66,82 @@ log "GW: $GW"
 log "DNS: $DNS1"
 
 ################################
-# Install tools
+# Download image to RAM
 ################################
 
-log "Installing tools..."
+log "Downloading Windows image to RAM..."
 
-apt-get update -y
-apt-get install -y kexec-tools busybox-static cpio wget
-
-################################
-# Prepare RAM initramfs
-################################
-
-rm -rf $WORK
-mkdir -p $WORK/{bin,proc,sys,dev,tmp}
-
-cp /bin/busybox $WORK/bin/
-
-ln -s busybox $WORK/bin/sh
-ln -s busybox $WORK/bin/mount
-ln -s busybox $WORK/bin/umount
-ln -s busybox $WORK/bin/mkdir
-ln -s busybox $WORK/bin/echo
-ln -s busybox $WORK/bin/sleep
-ln -s busybox $WORK/bin/wget
-ln -s busybox $WORK/bin/gunzip
+wget -O $TMP $IMG_URL
 
 ################################
-# Stage2 installer
+# Stop services
 ################################
 
-cat <<EOF > $WORK/bin/stage2.sh
-#!/bin/sh
+swapoff -a || true
 
-echo "[+] RAM installer started"
+################################
+# Unmount disk
+################################
 
-mount -t proc proc /proc
-mount -t sysfs sys /sys
-mount -t devtmpfs dev /dev
+log "Unmounting partitions..."
 
-DISK="$DISK"
-IMG_URL="$IMG_URL"
-MOUNT="$MOUNT"
+lsblk -ln $DISK | awk '{print $1}' | while read part; do
+ umount "/dev/$part" 2>/dev/null || true
+done
 
-mkdir -p \$MOUNT
+################################
+# Write disk
+################################
 
-echo "[+] Writing Windows image..."
+log "Writing Windows image..."
 
-wget -O- \$IMG_URL | gunzip | dd of=\$DISK bs=16M status=progress
+gunzip -c $TMP | dd of=$DISK bs=16M status=progress
 
 sync
 
-echo "[+] Searching Windows partition..."
+################################
+# Inject network
+################################
 
-for part in \${DISK}*; do
+mkdir -p $MOUNT
 
- mount \$part \$MOUNT 2>/dev/null || continue
+sleep 3
+partprobe $DISK || true
 
- if [ -d "\$MOUNT/Windows" ]; then
+for part in ${DISK}*; do
 
-  echo "[+] Windows partition found"
+ if mount $part $MOUNT 2>/dev/null; then
 
-  cat <<CONF > \$MOUNT/netconfig.txt
+  if [ -d "$MOUNT/Windows" ]; then
+
+   log "Windows partition found"
+
+   cat <<EOF > $MOUNT/netconfig.txt
 IP=$IPADDR
 MASK=$MASK
 GW=$GW
 DNS1=$DNS1
 PASS=Admin123!
-CONF
+EOF
 
-  sync
-  umount \$MOUNT
-  break
+   sync
+   umount $MOUNT
+   break
+
+  fi
+
+  umount $MOUNT
 
  fi
 
- umount \$MOUNT
-
 done
 
-echo "[+] Install complete"
-reboot -f
-EOF
-
-chmod +x $WORK/bin/stage2.sh
-
 ################################
-# RAM init
+# Reboot
 ################################
 
-cat <<EOF > $WORK/init
-#!/bin/sh
-exec /bin/stage2.sh
-EOF
+log "Installation finished"
+log "Rebooting..."
 
-chmod +x $WORK/init
-
-################################
-# Build initramfs
-################################
-
-cd $WORK
-find . | cpio -H newc -o > /tmp/winram.cpio
-
-################################
-# Load kernel
-################################
-
-KERNEL=$(ls -t /boot/vmlinuz* | head -n1)
-
-log "Kernel: $KERNEL"
-
-kexec -l $KERNEL \
- --initrd=/tmp/winram.cpio \
- --command-line="console=ttyS0 console=tty1 init=/init"
-
-sync
-
-log "Booting RAM environment..."
-
-kexec -e
+echo 1 > /proc/sys/kernel/sysrq
+echo b > /proc/sysrq-trigger

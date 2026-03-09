@@ -1,46 +1,21 @@
 #!/usr/bin/env bash
-
 set -e
 
 IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO99.gz"
+DISK="/dev/vda"
 
-echo "================================="
-echo "        Windows Installer"
-echo "================================="
-
-echo "Detecting system disk..."
-
-DISK=$(lsblk -dpno NAME,TYPE | awk '$2=="disk"{print $1}' | head -n1)
-
-if [ -z "$DISK" ]; then
-    echo "No disk detected!"
-    exit 1
-fi
-
-echo "Target disk: $DISK"
-
-echo "Stopping services using disk..."
+echo "Installing Windows on $DISK"
 
 swapoff -a || true
-
-echo "Attempting to unmount partitions..."
 
 lsblk -ln $DISK | awk '{print $1}' | while read part; do
     umount "/dev/$part" 2>/dev/null || true
 done
 
-echo "---------------------------------"
-echo "Downloading Windows image..."
-echo "---------------------------------"
+curl -L "$IMG_URL" | gunzip | dd of="$DISK" bs=16M status=progress
 
-curl -L "$IMG_URL" | gunzip | dd of="$DISK" bs=16M status=progress conv=fsync
+sync
 
-echo ""
-echo "Disk write finished."
+echo "Installation finished, rebooting..."
 
-echo "Forcing kernel reboot..."
-
-sleep 3
-
-echo 1 > /proc/sys/kernel/sysrq
-echo b > /proc/sysrq-trigger
+reboot -f

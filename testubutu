@@ -1,32 +1,23 @@
 #!/usr/bin/env bash
 set -e
 
-#####################################
-# CONFIG
-#####################################
-
 IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO2222.gz"
-WORKDIR="/tmp/wininst"
+WORKDIR="/tmp/winram"
 MOUNT="/mnt/win"
 
 log() { echo "[+] $1"; }
 
-#####################################
+##################################
 # Detect disk
-#####################################
+##################################
 
 DISK=$(lsblk -dpno NAME,TYPE | awk '$2=="disk"{print $1}' | head -n1)
 
-if [ -z "$DISK" ]; then
- echo "No disk found!"
- exit 1
-fi
-
 log "Target disk: $DISK"
 
-#####################################
+##################################
 # Detect network
-#####################################
+##################################
 
 log "Detecting network..."
 
@@ -41,6 +32,7 @@ IPADDR=${IPCIDR%/*}
 CIDR=${IPCIDR#*/}
 
 cidr_to_mask() {
+
 local cidr=$1
 local mask=""
 local full_octets=$((cidr/8))
@@ -65,56 +57,51 @@ MASK=$(cidr_to_mask $CIDR)
 DNS1=$(grep nameserver /etc/resolv.conf | head -n1 | awk '{print $2}')
 [ "$DNS1" = "127.0.0.53" ] && DNS1="8.8.8.8"
 
-log "IP: $IPADDR"
-log "MASK: $MASK"
-log "GW: $GW"
-log "DNS: $DNS1"
-
-#####################################
+##################################
 # Install kexec
-#####################################
+##################################
 
 log "Installing kexec..."
 
 apt-get update -y
 apt-get install -y kexec-tools
 
-#####################################
-# Prepare stage2
-#####################################
+##################################
+# Stage2 installer
+##################################
 
 mkdir -p $WORKDIR
 
 cat <<EOF > $WORKDIR/stage2.sh
-#!/usr/bin/env bash
-set -e
+#!/bin/sh
+
+echo "[+] RAM installer started"
+
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
 
 DISK="$DISK"
-IMG_URL="$IMG_URL"
-MOUNT="$MOUNT"
 
-echo "[+] Stage2 running from RAM"
-
-mkdir -p \$MOUNT
+mkdir -p $MOUNT
 
 echo "[+] Writing Windows image..."
 
-curl -L \$IMG_URL | gunzip | dd of=\$DISK bs=16M status=progress
+curl -L $IMG_URL | gunzip | dd of=\$DISK bs=16M status=progress
 
 sync
-sleep 2
 
 echo "[+] Searching Windows partition..."
 
 for part in \${DISK}*; do
 
- if mount \$part \$MOUNT 2>/dev/null; then
+ if mount \$part $MOUNT 2>/dev/null; then
 
-  if [ -d "\$MOUNT/Windows" ]; then
+  if [ -d "$MOUNT/Windows" ]; then
 
    echo "[+] Windows partition found"
 
-   cat <<CONF > \$MOUNT/netconfig.txt
+   cat <<CONF > $MOUNT/netconfig.txt
 IP=$IPADDR
 MASK=$MASK
 GW=$GW
@@ -123,63 +110,48 @@ PASS=Admin123!
 CONF
 
    sync
-   umount \$MOUNT
+   umount $MOUNT
    break
-
   fi
 
-  umount \$MOUNT
-
+  umount $MOUNT
  fi
 
 done
 
-echo "[+] Installation complete"
-echo "[+] Rebooting..."
+echo "[+] Install complete"
 
 reboot -f
 EOF
 
 chmod +x $WORKDIR/stage2.sh
 
-#####################################
-# Find kernel
-#####################################
+##################################
+# RAM init
+##################################
 
-log "Preparing RAM environment..."
-
-mkdir -p /tmp/ramstage
-
-cat <<'EOF' > /tmp/ramstage/init
+cat <<EOF > $WORKDIR/init
 #!/bin/sh
-
-echo "[+] RAM stage started"
-
-mount -t proc none /proc
-mount -t sysfs none /sys
-
-/tmp/stage2.sh
+exec $WORKDIR/stage2.sh
 EOF
 
-chmod +x /tmp/ramstage/init
+chmod +x $WORKDIR/init
 
-cp $WORKDIR/stage2.sh /tmp/stage2.sh
-
-####################################
-# Load kernel into RAM
-####################################
+##################################
+# Load kernel
+##################################
 
 KERNEL=$(find /boot -name "vmlinuz*" | head -n1)
 INITRD=$(find /boot -name "initrd.img*" | head -n1)
 
-echo "[+] Kernel: $KERNEL"
+log "Kernel: $KERNEL"
 
-kexec -l "$KERNEL" \
- --initrd="$INITRD" \
- --command-line="init=/tmp/ramstage/init"
+kexec -l $KERNEL \
+ --initrd=$INITRD \
+ --command-line="init=$WORKDIR/init"
 
 sync
 
-echo "[+] Booting RAM environment..."
+log "Booting RAM environment..."
 
 kexec -e

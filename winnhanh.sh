@@ -1,47 +1,48 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -e
 
-IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO11.gz"
+IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO99.gz"
 
 echo "================================="
-echo "     Windows VPS Installer"
+echo "       Windows VPS Installer"
 echo "================================="
 
-echo "Detecting disk..."
+echo "Detecting system disk..."
 
-for d in /dev/vda /dev/sda /dev/nvme0n1
-do
- if [ -b "$d" ]; then
-  DISK=$d
-  break
- fi
-done
+DISK=$(lsblk -ndo NAME,TYPE | awk '$2=="disk"{print "/dev/"$1}' | head -n1)
 
 if [ -z "$DISK" ]; then
- echo "No disk found!"
- exit 1
+    echo "No disk detected!"
+    exit 1
 fi
 
-echo "Disk: $DISK"
+echo "Disk detected: $DISK"
 
 echo "Installing required tools..."
-apt update -y
-apt install -y curl gzip
 
-echo "Starting Windows installation..."
+if ! command -v curl >/dev/null; then
+    apt-get update -y
+    apt-get install -y curl gzip
+fi
 
-curl -L "$IMG_URL" | gunzip | dd of=$DISK bs=32M status=progress
+echo "---------------------------------"
+echo "Downloading Windows image..."
+echo "---------------------------------"
+
+curl -L "$IMG_URL" | gunzip | dd of="$DISK" bs=16M status=progress oflag=direct
+
+echo ""
+echo "Flushing disk cache..."
 
 sync
 
 echo ""
 echo "================================="
-echo " Windows image written to disk"
-echo " Rebooting server..."
+echo " Windows installation completed"
+echo " System rebooting..."
 echo "================================="
 
 sleep 3
 
-echo 1 > /proc/sys/kernel/sysrq
-echo b > /proc/sysrq-trigger
+reboot

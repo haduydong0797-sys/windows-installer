@@ -8,6 +8,15 @@ MOUNT="/mnt/win"
 log(){ echo "[+] $*"; }
 
 ################################
+# Wait apt lock
+################################
+
+while fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+  log "Waiting for apt lock..."
+  sleep 2
+done
+
+################################
 # Detect disk
 ################################
 
@@ -74,7 +83,7 @@ log "DNS: $DNS1"
 log "Installing tools..."
 
 apt-get update -y
-apt-get install -y kexec-tools busybox-static cpio
+apt-get install -y kexec-tools busybox-static cpio wget
 
 ################################
 # Prepare RAM initramfs
@@ -175,13 +184,13 @@ find . | cpio -H newc -o > /tmp/winram.cpio
 # Load kernel
 ################################
 
-KERNEL=$(find /boot -name "vmlinuz*" | head -n1)
+KERNEL=$(ls -t /boot/vmlinuz* | head -n1)
 
 log "Kernel: $KERNEL"
 
 kexec -l $KERNEL \
  --initrd=/tmp/winram.cpio \
- --command-line="console=tty1 init=/init"
+ --command-line="console=ttyS0 console=tty1 init=/init"
 
 sync
 

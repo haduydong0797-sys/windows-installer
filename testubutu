@@ -5,7 +5,7 @@ set -euo pipefail
 # CONFIG
 #######################################
 
-IMG_URL="${IMG_URL:-https://your-server/windows.gz}"
+IMG_URL="${IMG_URL:-https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO2222.gz}"
 DISK="${DISK:-}"
 MOUNT_DIR="/mnt/win"
 PASSWORD="${PASSWORD:-Admin123!}"

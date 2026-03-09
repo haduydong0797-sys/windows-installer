@@ -1,29 +1,32 @@
 #!/usr/bin/env bash
 set -e
 
+#####################################
+# CONFIG
+#####################################
+
 IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO2222.gz"
-MOUNT_DIR="/mnt/win"
+WORKDIR="/tmp/wininst"
+MOUNT="/mnt/win"
 
-log() {
- echo "[+] $1"
-}
+log() { echo "[+] $1"; }
 
-###################################
+#####################################
 # Detect disk
-###################################
+#####################################
 
 DISK=$(lsblk -dpno NAME,TYPE | awk '$2=="disk"{print $1}' | head -n1)
 
 if [ -z "$DISK" ]; then
- echo "No disk detected!"
+ echo "No disk found!"
  exit 1
 fi
 
 log "Target disk: $DISK"
 
-###################################
+#####################################
 # Detect network
-###################################
+#####################################
 
 log "Detecting network..."
 
@@ -67,75 +70,96 @@ log "MASK: $MASK"
 log "GW: $GW"
 log "DNS: $DNS1"
 
-###################################
-# Prepare disk
-###################################
+#####################################
+# Install kexec
+#####################################
 
-log "Stopping swap..."
+log "Installing kexec..."
 
-swapoff -a || true
+apt-get update -y
+apt-get install -y kexec-tools
 
-log "Unmounting partitions..."
+#####################################
+# Prepare stage2
+#####################################
 
-lsblk -ln $DISK | awk '{print $1}' | while read part; do
- umount "/dev/$part" 2>/dev/null || true
-done
+mkdir -p $WORKDIR
 
-###################################
-# Write Windows image
-###################################
+cat <<EOF > $WORKDIR/stage2.sh
+#!/usr/bin/env bash
+set -e
 
-log "Downloading and writing image..."
+DISK="$DISK"
+IMG_URL="$IMG_URL"
+MOUNT="$MOUNT"
 
-curl -L $IMG_URL | gunzip | dd of=$DISK bs=16M status=progress
+echo "[+] Stage2 running from RAM"
+
+mkdir -p \$MOUNT
+
+echo "[+] Writing Windows image..."
+
+curl -L \$IMG_URL | gunzip | dd of=\$DISK bs=16M status=progress
 
 sync
+sleep 2
 
-###################################
-# Inject network config
-###################################
+echo "[+] Searching Windows partition..."
 
-log "Mounting Windows partition..."
+for part in \${DISK}*; do
 
-mkdir -p $MOUNT_DIR
+ if mount \$part \$MOUNT 2>/dev/null; then
 
-sleep 3
-partprobe $DISK || true
+  if [ -d "\$MOUNT/Windows" ]; then
 
-for part in ${DISK}*; do
+   echo "[+] Windows partition found"
 
- if mount $part $MOUNT_DIR 2>/dev/null; then
-
-  if [ -d "$MOUNT_DIR/Windows" ]; then
-
-   log "Windows partition found"
-
-   cat <<EOF > $MOUNT_DIR/netconfig.txt
+   cat <<CONF > \$MOUNT/netconfig.txt
 IP=$IPADDR
 MASK=$MASK
 GW=$GW
 DNS1=$DNS1
 PASS=Admin123!
-EOF
+CONF
 
    sync
-   umount $MOUNT_DIR
+   umount \$MOUNT
    break
 
   fi
 
-  umount $MOUNT_DIR
+  umount \$MOUNT
 
  fi
 
 done
 
-###################################
-# Reboot
-###################################
+echo "[+] Installation complete"
+echo "[+] Rebooting..."
 
-log "Installation finished"
-log "Rebooting..."
+reboot -f
+EOF
 
-echo 1 > /proc/sys/kernel/sysrq
-echo b > /proc/sysrq-trigger
+chmod +x $WORKDIR/stage2.sh
+
+#####################################
+# Find kernel
+#####################################
+
+KERNEL=$(find /boot -name "vmlinuz*" | head -n1)
+INITRD=$(find /boot -name "initrd.img*" | head -n1)
+
+log "Kernel: $KERNEL"
+
+#####################################
+# Boot RAM stage
+#####################################
+
+log "Booting RAM environment..."
+
+kexec -l $KERNEL \
+ --initrd=$INITRD \
+ --command-line="init=/bin/bash"
+
+sync
+kexec -e

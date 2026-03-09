@@ -1,140 +1,174 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -e
 
-IMG_URL="${IMG_URL:-https://your-server.example.com/windows.gz}"
-DISK="${DISK:-/dev/vda}"
-MOUNTDIR="/mnt/win"
-PASSWORD="${PASSWORD:-Admin@123456}"
-MODE="${MODE:-static}"
+#######################################
+# CONFIG
+#######################################
 
-log() {
-    echo "[$(date '+%F %T')] $*"
-}
+IMG_URL="https://your-server/windows.gz"
+DISK="/dev/vda"
 
-fail() {
-    echo "[ERROR] $*" >&2
-    exit 1
-}
+MOUNT_DIR="/mnt/win"
+
+#######################################
+# CIDR → NETMASK
+#######################################
 
 cidr_to_mask() {
-    local cidr="$1"
-    local mask=""
-    local full_octets=$((cidr / 8))
-    local partial_octet=$((cidr % 8))
-    local i
 
-    for ((i=0; i<4; i++)); do
-        if (( i < full_octets )); then
-            mask+="255"
-        elif (( i == full_octets && partial_octet > 0 )); then
-            mask+="$((256 - 2**(8-partial_octet)))"
-        else
-            mask+="0"
-        fi
-        [[ $i -lt 3 ]] && mask+="."
-    done
+local cidr=$1
+local mask=""
+local full_octets=$((cidr/8))
+local partial_octet=$((cidr%8))
 
-    echo "$mask"
+for ((i=0;i<4;i++)); do
+if [ $i -lt $full_octets ]; then
+mask+=255
+elif [ $i -eq $full_octets ]; then
+mask+=$((256-2**(8-$partial_octet)))
+else
+mask+=0
+fi
+[ $i -lt 3 ] && mask+=.
+done
+
+echo $mask
 }
+
+#######################################
+# DETECT NETWORK
+#######################################
 
 detect_network() {
-    local route iface_cidr
 
-    route="$(ip -4 route get 1.1.1.1 2>/dev/null | head -n1)"
-    IFACE="$(awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' <<<"$route")"
-    GW="$(awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}' <<<"$route")"
+echo "Detecting network..."
 
-    iface_cidr="$(ip -4 -o addr show dev "$IFACE" scope global | awk '{print $4}' | head -n1)"
-    IPADDR="${iface_cidr%/*}"
-    CIDR="${iface_cidr#*/}"
-    MASK="$(cidr_to_mask "$CIDR")"
+route=$(ip -4 route get 1.1.1.1)
 
-    DNS1="$(awk '/^nameserver /{print $2; exit}' /etc/resolv.conf)"
-    DNS2="$(awk '/^nameserver /{count++; if(count==2){print $2; exit}}' /etc/resolv.conf)"
+IFACE=$(echo $route | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+GW=$(echo $route | awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}')
 
-    [[ -z "$DNS1" ]] && DNS1="8.8.8.8"
+IPCIDR=$(ip -4 -o addr show dev $IFACE scope global | awk '{print $4}' | head -n1)
+
+IPADDR=${IPCIDR%/*}
+CIDR=${IPCIDR#*/}
+
+MASK=$(cidr_to_mask $CIDR)
+
+DNS1=$(grep nameserver /etc/resolv.conf | head -n1 | awk '{print $2}')
+DNS2=$(grep nameserver /etc/resolv.conf | sed -n 2p | awk '{print $2}')
+
+echo "IP: $IPADDR"
+echo "MASK: $MASK"
+echo "GW: $GW"
+echo "DNS1: $DNS1"
+echo "DNS2: $DNS2"
 }
+
+#######################################
+# PREPARE DISK
+#######################################
 
 prepare_disk() {
-    log "Disabling swap"
-    swapoff -a || true
 
-    log "Unmounting partitions on $DISK"
-    while read -r name; do
-        [[ "$name" == "$(basename "$DISK")" ]] && continue
-        umount "/dev/$name" 2>/dev/null || true
-    done < <(lsblk -ln "$DISK" -o NAME)
+echo "Stopping swap..."
+swapoff -a || true
+
+echo "Unmounting partitions..."
+
+lsblk -ln $DISK | awk '{print $1}' | while read part; do
+umount "/dev/$part" 2>/dev/null || true
+done
+
 }
+
+#######################################
+# WRITE WINDOWS IMAGE
+#######################################
 
 write_image() {
-    log "Downloading and writing image to $DISK"
-    curl -L "$IMG_URL" | gunzip | dd of="$DISK" bs=16M status=progress conv=fsync
-    sync
-    partprobe "$DISK" || true
-    sleep 3
+
+echo "Downloading and writing image..."
+
+curl -L $IMG_URL | gunzip | dd of=$DISK bs=16M status=progress
+
+sync
+partprobe $DISK || true
+sleep 3
+
 }
+
+#######################################
+# FIND WINDOWS PARTITION
+#######################################
 
 mount_windows_partition() {
-    mkdir -p "$MOUNTDIR"
 
-    for part in "${DISK}"*; do
-        [[ "$part" == "$DISK" ]] && continue
-        if mount "$part" "$MOUNTDIR" 2>/dev/null; then
-            if [[ -d "$MOUNTDIR/Windows" ]]; then
-                WINPART="$part"
-                log "Mounted Windows partition: $WINPART"
-                return 0
-            fi
-            umount "$MOUNTDIR" || true
-        fi
-    done
+mkdir -p $MOUNT_DIR
 
-    fail "Windows partition not found"
+for part in ${DISK}*; do
+
+if mount $part $MOUNT_DIR 2>/dev/null; then
+
+if [ -d "$MOUNT_DIR/Windows" ]; then
+WINPART=$part
+echo "Windows partition found: $WINPART"
+return
+fi
+
+umount $MOUNT_DIR
+
+fi
+
+done
+
+echo "Windows partition not found!"
+exit 1
 }
 
-write_netconfig() {
-    local cfg="$MOUNTDIR/netconfig.txt"
+#######################################
+# CREATE NETWORK CONFIG
+#######################################
 
-    if [[ "$MODE" == "dhcp" ]]; then
-        cat > "$cfg" <<EOF
-MODE=dhcp
-PASSWORD=$PASSWORD
-EOF
-    else
-        cat > "$cfg" <<EOF
-MODE=static
+create_netconfig() {
+
+echo "Writing network config..."
+
+cat <<EOF > $MOUNT_DIR/netconfig.txt
 IP=$IPADDR
 MASK=$MASK
 GW=$GW
 DNS1=$DNS1
-DNS2=${DNS2:-}
-PASSWORD=$PASSWORD
+DNS2=$DNS2
+PASS=Admin123!
 EOF
-    fi
 
-    sync
-    log "Written $cfg"
+sync
+
 }
 
-main() {
-    [[ $EUID -eq 0 ]] || fail "Run as root"
-    [[ -b "$DISK" ]] || fail "Disk not found: $DISK"
+#######################################
+# REBOOT
+#######################################
 
-    if [[ "$MODE" == "static" ]]; then
-        detect_network
-        log "IP=$IPADDR MASK=$MASK GW=$GW DNS1=$DNS1 DNS2=${DNS2:-}"
-    fi
+finish() {
 
-    prepare_disk
-    write_image
-    mount_windows_partition
-    write_netconfig
+umount $MOUNT_DIR || true
 
-    umount "$MOUNTDIR" || true
-    sync
+echo "Installation complete."
+echo "Rebooting..."
 
-    log "Done. Rebooting..."
-    reboot -f
+reboot -f
+
 }
 
-main "$@"
+#######################################
+# MAIN
+#######################################
+
+detect_network
+prepare_disk
+write_image
+mount_windows_partition
+create_netconfig
+finish

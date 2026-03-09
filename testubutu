@@ -1,45 +1,42 @@
 #!/usr/bin/env bash
 set -e
 
-#####################################
-# CONFIG
-#####################################
-
 IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO2222.gz"
 WORKDIR="/tmp/wininstall"
-DISK=""
-
-#####################################
-# LOG
-#####################################
+MOUNT="/mnt/win"
 
 log() {
-    echo "[+] $1"
+  echo "[+] $1"
 }
 
-#####################################
-# DETECT DISK
-#####################################
-
-detect_disk() {
+#################################
+# Detect disk
+#################################
 
 DISK=$(lsblk -dpno NAME,TYPE | awk '$2=="disk"{print $1}' | head -n1)
 
 if [ -z "$DISK" ]; then
-    echo "No disk detected!"
-    exit 1
+  echo "No disk found!"
+  exit 1
 fi
 
 log "Target disk: $DISK"
 
-}
+#################################
+# Detect network
+#################################
 
-#####################################
-# CIDR -> NETMASK
-#####################################
+route=$(ip -4 route get 1.1.1.1)
+
+IFACE=$(echo $route | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+GW=$(echo $route | awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}')
+
+IPCIDR=$(ip -4 -o addr show dev $IFACE scope global | awk '{print $4}' | head -n1)
+
+IPADDR=${IPCIDR%/*}
+CIDR=${IPCIDR#*/}
 
 cidr_to_mask() {
-
 local cidr=$1
 local mask=""
 local full_octets=$((cidr/8))
@@ -59,44 +56,40 @@ done
 echo $mask
 }
 
-#####################################
-# DETECT NETWORK
-#####################################
-
-detect_network() {
-
-log "Detecting network..."
-
-route=$(ip -4 route get 1.1.1.1)
-
-IFACE=$(echo $route | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
-GW=$(echo $route | awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}')
-
-IPCIDR=$(ip -4 -o addr show dev $IFACE scope global | awk '{print $4}' | head -n1)
-
-IPADDR=${IPCIDR%/*}
-CIDR=${IPCIDR#*/}
-
 MASK=$(cidr_to_mask $CIDR)
 
 DNS1=$(grep nameserver /etc/resolv.conf | head -n1 | awk '{print $2}')
-
-if [[ "$DNS1" == "127.0.0.53" ]]; then
-DNS1="8.8.8.8"
-fi
+[ "$DNS1" = "127.0.0.53" ] && DNS1="8.8.8.8"
 
 log "IP: $IPADDR"
 log "MASK: $MASK"
 log "GW: $GW"
 log "DNS: $DNS1"
 
-}
+#################################
+# Install kexec
+#################################
 
-#####################################
-# PREPARE STAGE2 SCRIPT
-#####################################
+log "Installing kexec..."
 
-prepare_stage2() {
+apt-get update -y
+apt-get install -y kexec-tools
+
+#################################
+# Find kernel
+#################################
+
+KERNEL=$(ls /boot/vmlinuz* | head -n1)
+INITRD=$(ls /boot/initrd.img* | head -n1)
+
+if [ ! -f "$KERNEL" ]; then
+  echo "Kernel not found!"
+  exit 1
+fi
+
+#################################
+# Create stage2
+#################################
 
 mkdir -p $WORKDIR
 
@@ -104,12 +97,12 @@ cat <<EOF > $WORKDIR/stage2.sh
 #!/usr/bin/env bash
 set -e
 
-echo "[+] Stage2 running in RAM"
-
 DISK="$DISK"
 IMG_URL="$IMG_URL"
 
-mkdir -p /mnt/win
+echo "[+] Stage2 running from RAM"
+
+mkdir -p $MOUNT
 
 echo "[+] Writing Windows image..."
 
@@ -121,13 +114,13 @@ echo "[+] Searching Windows partition..."
 
 for part in \${DISK}*; do
 
-if mount \$part /mnt/win 2>/dev/null; then
+if mount \$part $MOUNT 2>/dev/null; then
 
-if [ -d "/mnt/win/Windows" ]; then
+if [ -d "$MOUNT/Windows" ]; then
 
 echo "[+] Windows partition found"
 
-cat <<CONF > /mnt/win/netconfig.txt
+cat <<CONF > $MOUNT/netconfig.txt
 IP=$IPADDR
 MASK=$MASK
 GW=$GW
@@ -136,55 +129,36 @@ PASS=Admin123!
 CONF
 
 sync
-umount /mnt/win
+umount $MOUNT
 break
+
 fi
 
-umount /mnt/win
+umount $MOUNT
+
 fi
 
 done
 
-echo "[+] Installation finished"
-echo "[+] Rebooting..."
+echo "[+] Finished. Rebooting..."
 
 reboot -f
 EOF
 
 chmod +x $WORKDIR/stage2.sh
 
-}
-
-#####################################
-# KEXEC INTO RAM
-#####################################
-
-boot_ram_stage() {
+#################################
+# Load RAM kernel
+#################################
 
 log "Loading RAM kernel..."
 
-apt-get update -y
-apt-get install -y kexec-tools
-
-KERNEL=$(ls /boot/vmlinuz* | head -n1)
-INITRD=$(ls /boot/initrd.img* | head -n1)
-
-kexec -l \$KERNEL \
---initrd=\$INITRD \
+kexec -l $KERNEL \
+--initrd=$INITRD \
 --command-line="init=/bin/bash"
+
+sync
 
 log "Switching to RAM environment..."
 
-sync
 kexec -e
-
-}
-
-#####################################
-# MAIN
-#####################################
-
-detect_disk
-detect_network
-prepare_stage2
-boot_ram_stage

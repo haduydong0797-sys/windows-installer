@@ -1,295 +1,140 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-#############################################
-# Windows VPS Installer
-# TinyInstaller-style
-#############################################
+IMG_URL="${IMG_URL:-https://your-server.example.com/windows.gz}"
+DISK="${DISK:-/dev/vda}"
+MOUNTDIR="/mnt/win"
+PASSWORD="${PASSWORD:-Admin@123456}"
+MODE="${MODE:-static}"
 
-VERSION="1.0"
-
-IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO99.gz"
-
-WORKDIR="/tmp/wininst"
-MOUNT="/mnt/win"
-DISK=""
-
-#############################################
-# UI
-#############################################
-
-banner() {
-
-echo "======================================"
-echo " Windows VPS Installer $VERSION"
-echo " TinyInstaller-style script"
-echo "======================================"
-
+log() {
+    echo "[$(date '+%F %T')] $*"
 }
 
-#############################################
-# Detect disk
-#############################################
-
-detect_disk() {
-
-echo "[*] Detecting system disk..."
-
-DISK=$(lsblk -dpno NAME,TYPE | awk '$2=="disk"{print $1}' | head -n1)
-
-if [ -z "$DISK" ]; then
-    echo "No disk detected"
+fail() {
+    echo "[ERROR] $*" >&2
     exit 1
-fi
-
-echo "[OK] Disk detected: $DISK"
-
 }
-
-#############################################
-# Stop services
-#############################################
-
-stop_services() {
-
-echo "[*] Disabling swap"
-
-swapoff -a || true
-
-echo "[*] Killing disk processes"
-
-fuser -km $DISK || true
-
-}
-
-#############################################
-# Unmount partitions
-#############################################
-
-unmount_disk() {
-
-echo "[*] Unmounting partitions"
-
-lsblk -ln $DISK | awk '{print $1}' | while read part; do
-    umount "/dev/$part" 2>/dev/null || true
-done
-
-}
-
-#############################################
-# Detect network
-#############################################
-
-detect_network() {
-
-echo "[*] Detecting network..."
-
-IP=$(ip -4 addr show scope global | grep inet | head -n1 | awk '{print $2}')
-IPADDR=$(echo $IP | cut -d/ -f1)
-CIDR=$(echo $IP | cut -d/ -f2)
-
-GW=$(ip route | grep default | awk '{print $3}' | head -n1)
-
-DNS=$(grep nameserver /etc/resolv.conf | head -n1 | awk '{print $2}')
-
-if [ -z "$DNS" ]; then
-DNS="8.8.8.8"
-fi
-
-MASK=$(cidr_to_mask $CIDR)
-
-echo "IP: $IPADDR"
-echo "MASK: $MASK"
-echo "GW: $GW"
-echo "DNS: $DNS"
-
-}
-
-#############################################
-# CIDR -> NETMASK
-#############################################
 
 cidr_to_mask() {
+    local cidr="$1"
+    local mask=""
+    local full_octets=$((cidr / 8))
+    local partial_octet=$((cidr % 8))
+    local i
 
-local i mask=""
-local full_octets=$(($1/8))
-local partial_octet=$(($1%8))
+    for ((i=0; i<4; i++)); do
+        if (( i < full_octets )); then
+            mask+="255"
+        elif (( i == full_octets && partial_octet > 0 )); then
+            mask+="$((256 - 2**(8-partial_octet)))"
+        else
+            mask+="0"
+        fi
+        [[ $i -lt 3 ]] && mask+="."
+    done
 
-for ((i=0;i<4;i++)); do
-if [ $i -lt $full_octets ]; then
-mask+=255
-elif [ $i -eq $full_octets ]; then
-mask+=$((256-2**(8-$partial_octet)))
-else
-mask+=0
-fi
-test $i -lt 3 && mask+=.
-done
-
-echo $mask
-
+    echo "$mask"
 }
 
-#############################################
-# Download Windows image
-#############################################
+detect_network() {
+    local route iface_cidr
 
-download_image() {
+    route="$(ip -4 route get 1.1.1.1 2>/dev/null | head -n1)"
+    IFACE="$(awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' <<<"$route")"
+    GW="$(awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}' <<<"$route")"
 
-echo "[*] Downloading Windows image..."
+    iface_cidr="$(ip -4 -o addr show dev "$IFACE" scope global | awk '{print $4}' | head -n1)"
+    IPADDR="${iface_cidr%/*}"
+    CIDR="${iface_cidr#*/}"
+    MASK="$(cidr_to_mask "$CIDR")"
 
-mkdir -p $WORKDIR
-cd $WORKDIR
+    DNS1="$(awk '/^nameserver /{print $2; exit}' /etc/resolv.conf)"
+    DNS2="$(awk '/^nameserver /{count++; if(count==2){print $2; exit}}' /etc/resolv.conf)"
 
-curl -L "$IMG_URL" -o win.gz
-
-echo "[OK] Download finished"
-
+    [[ -z "$DNS1" ]] && DNS1="8.8.8.8"
 }
 
-#############################################
-# Write disk
-#############################################
+prepare_disk() {
+    log "Disabling swap"
+    swapoff -a || true
 
-write_disk() {
-
-echo "[*] Writing image to disk..."
-
-gunzip -c win.gz | dd of=$DISK bs=16M status=progress conv=fsync
-
-sync
-
-echo "[OK] Image written"
-
+    log "Unmounting partitions on $DISK"
+    while read -r name; do
+        [[ "$name" == "$(basename "$DISK")" ]] && continue
+        umount "/dev/$name" 2>/dev/null || true
+    done < <(lsblk -ln "$DISK" -o NAME)
 }
 
-#############################################
-# Mount Windows
-#############################################
-
-mount_windows() {
-
-echo "[*] Mounting Windows partition..."
-
-mkdir -p $MOUNT
-
-mount ${DISK}2 $MOUNT 2>/dev/null || mount ${DISK}1 $MOUNT
-
+write_image() {
+    log "Downloading and writing image to $DISK"
+    curl -L "$IMG_URL" | gunzip | dd of="$DISK" bs=16M status=progress conv=fsync
+    sync
+    partprobe "$DISK" || true
+    sleep 3
 }
 
-#############################################
-# Inject network config
-#############################################
+mount_windows_partition() {
+    mkdir -p "$MOUNTDIR"
 
-inject_network() {
+    for part in "${DISK}"*; do
+        [[ "$part" == "$DISK" ]] && continue
+        if mount "$part" "$MOUNTDIR" 2>/dev/null; then
+            if [[ -d "$MOUNTDIR/Windows" ]]; then
+                WINPART="$part"
+                log "Mounted Windows partition: $WINPART"
+                return 0
+            fi
+            umount "$MOUNTDIR" || true
+        fi
+    done
 
-echo "[*] Injecting network config..."
+    fail "Windows partition not found"
+}
 
-cat <<EOF > $MOUNT/netconfig.txt
+write_netconfig() {
+    local cfg="$MOUNTDIR/netconfig.txt"
+
+    if [[ "$MODE" == "dhcp" ]]; then
+        cat > "$cfg" <<EOF
+MODE=dhcp
+PASSWORD=$PASSWORD
+EOF
+    else
+        cat > "$cfg" <<EOF
+MODE=static
 IP=$IPADDR
 MASK=$MASK
 GW=$GW
-DNS=$DNS
-PASS=Admin$(date +%s | tail -c 6)
+DNS1=$DNS1
+DNS2=${DNS2:-}
+PASSWORD=$PASSWORD
 EOF
+    fi
 
+    sync
+    log "Written $cfg"
 }
 
-#############################################
-# Windows boot script
-#############################################
+main() {
+    [[ $EUID -eq 0 ]] || fail "Run as root"
+    [[ -b "$DISK" ]] || fail "Disk not found: $DISK"
 
-install_windows_script() {
+    if [[ "$MODE" == "static" ]]; then
+        detect_network
+        log "IP=$IPADDR MASK=$MASK GW=$GW DNS1=$DNS1 DNS2=${DNS2:-}"
+    fi
 
-echo "[*] Installing Windows first boot script..."
+    prepare_disk
+    write_image
+    mount_windows_partition
+    write_netconfig
 
-mkdir -p $MOUNT/Windows/Setup/Scripts
+    umount "$MOUNTDIR" || true
+    sync
 
-cat <<'EOF' > $MOUNT/Windows/Setup/Scripts/SetupComplete.cmd
-@echo off
-
-set CONFIG=C:\netconfig.txt
-
-for /f "tokens=1,2 delims==" %%a in (%CONFIG%) do (
- set %%a=%%b
-)
-
-net user Administrator %PASS%
-
-netsh interface ip set address "Ethernet" static %IP% %MASK% %GW%
-
-netsh interface ip set dns "Ethernet" static %DNS%
-
-reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
-
-netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
-
-exit
-EOF
-
+    log "Done. Rebooting..."
+    reboot -f
 }
 
-#############################################
-# Expand disk
-#############################################
-
-expand_disk_script() {
-
-echo "[*] Adding auto disk expand..."
-
-cat <<'EOF' > $MOUNT/expand.ps1
-$res = Get-Partition -DriveLetter C
-Resize-Partition -DriveLetter C -Size $res.SizeMax
-EOF
-
-}
-
-#############################################
-# Cleanup
-#############################################
-
-cleanup() {
-
-echo "[*] Cleaning up..."
-
-umount $MOUNT || true
-
-rm -rf $WORKDIR || true
-
-}
-
-#############################################
-# Reboot
-#############################################
-
-reboot_system() {
-
-echo ""
-echo "================================"
-echo " Installation completed"
-echo " Windows will boot now"
-echo "================================"
-
-sleep 3
-
-reboot -f
-
-}
-
-#############################################
-# MAIN
-#############################################
-
-banner
-detect_disk
-stop_services
-unmount_disk
-detect_network
-download_image
-write_disk
-mount_windows
-inject_network
-install_windows_script
-expand_disk_script
-cleanup
-reboot_system
+main "$@"

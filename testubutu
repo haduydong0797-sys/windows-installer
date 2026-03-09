@@ -10,30 +10,37 @@ echo "================================="
 
 echo "Detecting system disk..."
 
-DISK=$(lsblk -ndo NAME,TYPE | awk '$2=="disk"{print "/dev/"$1}' | head -n1)
+DISK=$(lsblk -dpno NAME,TYPE | awk '$2=="disk"{print $1}' | head -n1)
 
 if [ -z "$DISK" ]; then
     echo "No disk detected!"
     exit 1
 fi
 
-echo "Disk detected: $DISK"
+echo "Target disk: $DISK"
 
-echo "Unmounting mounted partitions..."
+echo "Stopping services using disk..."
 
-for p in $(lsblk -ln $DISK | awk '{print $1}'); do
-    umount /dev/$p 2>/dev/null || true
+swapoff -a || true
+
+echo "Attempting to unmount partitions..."
+
+lsblk -ln $DISK | awk '{print $1}' | while read part; do
+    umount "/dev/$part" 2>/dev/null || true
 done
 
-echo "Downloading and writing Windows image..."
+echo "---------------------------------"
+echo "Downloading Windows image..."
+echo "---------------------------------"
 
-curl -L "$IMG_URL" | gunzip | dd of=$DISK bs=16M status=progress oflag=direct
+curl -L "$IMG_URL" | gunzip | dd of="$DISK" bs=16M status=progress conv=fsync
 
-echo "Flushing disk cache..."
-sync
+echo ""
+echo "Disk write finished."
 
-echo "Installation completed. Rebooting..."
+echo "Forcing kernel reboot..."
 
 sleep 3
 
-reboot
+echo 1 > /proc/sys/kernel/sysrq
+echo b > /proc/sysrq-trigger

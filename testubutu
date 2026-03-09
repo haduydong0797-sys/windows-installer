@@ -1,21 +1,49 @@
-#!/usr/bin/env bash
+#!/bin/bash
+
 set -e
 
 IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO99.gz"
-DISK="/dev/vda"
 
-echo "Installing Windows on $DISK"
+echo "================================="
+echo " Windows RAM Installer"
+echo "================================="
 
-swapoff -a || true
+echo "Installing required tools..."
+apt update -y
+apt install -y kexec-tools curl gzip
 
-lsblk -ln $DISK | awk '{print $1}' | while read part; do
-    umount "/dev/$part" 2>/dev/null || true
-done
+echo "Detecting disk..."
 
-curl -L "$IMG_URL" | gunzip | dd of="$DISK" bs=16M status=progress
+DISK=$(lsblk -ndo NAME,TYPE | awk '$2=="disk"{print "/dev/"$1}' | head -n1)
 
+if [ -z "$DISK" ]; then
+ echo "No disk found!"
+ exit 1
+fi
+
+echo "Target disk: $DISK"
+
+echo "Loading kernel into RAM..."
+
+kexec -l /boot/vmlinuz-$(uname -r) \
+--initrd=/boot/initrd.img-$(uname -r) \
+--command-line="$(cat /proc/cmdline) rdinit=/bin/bash"
+
+echo "Booting RAM kernel..."
+kexec -e
+
+echo "Mounting RAM filesystem..."
+
+mount -t tmpfs tmpfs /mnt
+cd /mnt
+
+echo "Downloading and writing Windows image..."
+
+curl -L "$IMG_URL" | gunzip | dd of=$DISK bs=16M status=progress
+
+echo "Syncing disk..."
 sync
 
-echo "Installation finished, rebooting..."
+echo "Rebooting into Windows..."
 
 reboot -f

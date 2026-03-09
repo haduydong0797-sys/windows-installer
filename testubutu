@@ -1,264 +1,190 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -e
 
-#######################################
+#####################################
 # CONFIG
-#######################################
+#####################################
 
-IMG_URL="${IMG_URL:-https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO2222.gz}"
-DISK="${DISK:-}"
-MOUNT_DIR="/mnt/win"
-PASSWORD="${PASSWORD:-Admin123!}"
-MODE="${MODE:-static}"   # static | dhcp
+IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO2222.gz"
+WORKDIR="/tmp/wininstall"
+DISK=""
 
-#######################################
+#####################################
 # LOG
-#######################################
+#####################################
 
 log() {
-    echo "[$(date '+%F %T')] $*"
+    echo "[+] $1"
 }
 
-fail() {
-    echo "[ERROR] $*" >&2
-    exit 1
-}
-
-#######################################
-# CIDR -> NETMASK
-#######################################
-
-cidr_to_mask() {
-    local cidr="$1"
-    local mask=""
-    local full_octets=$((cidr / 8))
-    local partial_octet=$((cidr % 8))
-    local i
-
-    for ((i=0; i<4; i++)); do
-        if (( i < full_octets )); then
-            mask+="255"
-        elif (( i == full_octets && partial_octet > 0 )); then
-            mask+="$((256 - 2**(8 - partial_octet)))"
-        else
-            mask+="0"
-        fi
-        [[ $i -lt 3 ]] && mask+="."
-    done
-
-    echo "$mask"
-}
-
-#######################################
-# REQUIRE ROOT
-#######################################
-
-require_root() {
-    [[ $EUID -eq 0 ]] || fail "Please run as root"
-}
-
-#######################################
+#####################################
 # DETECT DISK
-#######################################
+#####################################
 
 detect_disk() {
-    if [[ -n "$DISK" ]]; then
-        [[ -b "$DISK" ]] || fail "Disk not found: $DISK"
-        log "Using manual disk: $DISK"
-        return
-    fi
 
-    DISK="$(lsblk -dpno NAME,TYPE | awk '$2=="disk"{print $1}' | head -n1)"
-    [[ -n "$DISK" ]] || fail "No disk detected"
+DISK=$(lsblk -dpno NAME,TYPE | awk '$2=="disk"{print $1}' | head -n1)
 
-    log "Detected target disk: $DISK"
+if [ -z "$DISK" ]; then
+    echo "No disk detected!"
+    exit 1
+fi
+
+log "Target disk: $DISK"
+
 }
 
-#######################################
+#####################################
+# CIDR -> NETMASK
+#####################################
+
+cidr_to_mask() {
+
+local cidr=$1
+local mask=""
+local full_octets=$((cidr/8))
+local partial_octet=$((cidr%8))
+
+for ((i=0;i<4;i++)); do
+if [ $i -lt $full_octets ]; then
+mask+=255
+elif [ $i -eq $full_octets ]; then
+mask+=$((256-2**(8-$partial_octet)))
+else
+mask+=0
+fi
+[ $i -lt 3 ] && mask+=.
+done
+
+echo $mask
+}
+
+#####################################
 # DETECT NETWORK
-#######################################
+#####################################
 
 detect_network() {
-    log "Detecting network..."
 
-    local route iface_cidr
+log "Detecting network..."
 
-    route="$(ip -4 route get 1.1.1.1 2>/dev/null | head -n1 || true)"
-    [[ -n "$route" ]] || fail "Cannot detect route"
+route=$(ip -4 route get 1.1.1.1)
 
-    IFACE="$(awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' <<<"$route")"
-    GW="$(awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}' <<<"$route")"
+IFACE=$(echo $route | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+GW=$(echo $route | awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}')
 
-    [[ -n "${IFACE:-}" ]] || fail "Cannot detect interface"
+IPCIDR=$(ip -4 -o addr show dev $IFACE scope global | awk '{print $4}' | head -n1)
 
-    iface_cidr="$(ip -4 -o addr show dev "$IFACE" scope global | awk '{print $4}' | head -n1)"
-    [[ -n "$iface_cidr" ]] || fail "Cannot detect IPv4 address"
+IPADDR=${IPCIDR%/*}
+CIDR=${IPCIDR#*/}
 
-    IPADDR="${iface_cidr%/*}"
-    CIDR="${iface_cidr#*/}"
-    MASK="$(cidr_to_mask "$CIDR")"
+MASK=$(cidr_to_mask $CIDR)
 
-    DNS1="$(awk '/^nameserver /{print $2; exit}' /etc/resolv.conf || true)"
-    DNS2="$(awk '/^nameserver /{count++; if(count==2){print $2; exit}}' /etc/resolv.conf || true)"
+DNS1=$(grep nameserver /etc/resolv.conf | head -n1 | awk '{print $2}')
 
-    [[ -n "${DNS1:-}" ]] || DNS1="8.8.8.8"
+if [[ "$DNS1" == "127.0.0.53" ]]; then
+DNS1="8.8.8.8"
+fi
 
-    log "Interface : $IFACE"
-    log "IP        : $IPADDR/$CIDR"
-    log "MASK      : $MASK"
-    log "Gateway   : $GW"
-    log "DNS1      : $DNS1"
-    log "DNS2      : ${DNS2:-<empty>}"
+log "IP: $IPADDR"
+log "MASK: $MASK"
+log "GW: $GW"
+log "DNS: $DNS1"
+
 }
 
-#######################################
-# PREPARE DISK
-#######################################
+#####################################
+# PREPARE STAGE2 SCRIPT
+#####################################
 
-prepare_disk() {
-    log "Disabling swap..."
-    swapoff -a || true
+prepare_stage2() {
 
-    log "Unmounting partitions on $DISK ..."
-    while read -r part_name; do
-        [[ "$part_name" == "$(basename "$DISK")" ]] && continue
-        umount "/dev/$part_name" 2>/dev/null || true
-    done < <(lsblk -ln "$DISK" -o NAME)
+mkdir -p $WORKDIR
 
-    sync
-}
+cat <<EOF > $WORKDIR/stage2.sh
+#!/usr/bin/env bash
+set -e
 
-#######################################
-# DOWNLOAD + WRITE IMAGE
-#######################################
+echo "[+] Stage2 running in RAM"
 
-write_image() {
-    log "Downloading and writing image..."
-    log "Source: $IMG_URL"
+DISK="$DISK"
+IMG_URL="$IMG_URL"
 
-    if command -v wget >/dev/null 2>&1; then
-        wget -O- "$IMG_URL" | gunzip | dd of="$DISK" bs=16M status=progress conv=fsync
-    else
-        curl -L "$IMG_URL" | gunzip | dd of="$DISK" bs=16M status=progress conv=fsync
-    fi
+mkdir -p /mnt/win
 
-    sync
-    partprobe "$DISK" || true
-    sleep 3
+echo "[+] Writing Windows image..."
 
-    log "Image write completed"
-}
+curl -L \$IMG_URL | gunzip | dd of=\$DISK bs=16M status=progress
 
-#######################################
-# FIND WINDOWS PARTITION
-#######################################
+sync
 
-mount_windows_partition() {
-    mkdir -p "$MOUNT_DIR"
+echo "[+] Searching Windows partition..."
 
-    log "Searching for Windows partition..."
+for part in \${DISK}*; do
 
-    local part
-    for part in "${DISK}"*; do
-        [[ "$part" == "$DISK" ]] && continue
+if mount \$part /mnt/win 2>/dev/null; then
 
-        if mount "$part" "$MOUNT_DIR" 2>/dev/null; then
-            if [[ -d "$MOUNT_DIR/Windows" ]]; then
-                WINPART="$part"
-                log "Windows partition found: $WINPART"
-                return 0
-            fi
-            umount "$MOUNT_DIR" || true
-        fi
-    done
+if [ -d "/mnt/win/Windows" ]; then
 
-    fail "Windows partition not found"
-}
+echo "[+] Windows partition found"
 
-#######################################
-# CREATE NETCONFIG
-#######################################
-
-create_netconfig() {
-    log "Writing network config..."
-
-    local cfg="$MOUNT_DIR/netconfig.txt"
-
-    if [[ "$MODE" == "dhcp" ]]; then
-        cat > "$cfg" <<EOF
-MODE=dhcp
-PASSWORD=$PASSWORD
-EOF
-    else
-        cat > "$cfg" <<EOF
-MODE=static
+cat <<CONF > /mnt/win/netconfig.txt
 IP=$IPADDR
 MASK=$MASK
 GW=$GW
 DNS1=$DNS1
-DNS2=${DNS2:-}
-PASSWORD=$PASSWORD
+PASS=Admin123!
+CONF
+
+sync
+umount /mnt/win
+break
+fi
+
+umount /mnt/win
+fi
+
+done
+
+echo "[+] Installation finished"
+echo "[+] Rebooting..."
+
+reboot -f
 EOF
-    fi
 
-    sync
-    log "Written: $cfg"
+chmod +x $WORKDIR/stage2.sh
+
 }
 
-#######################################
-# SHOW SUMMARY
-#######################################
+#####################################
+# KEXEC INTO RAM
+#####################################
 
-show_summary() {
-    echo
-    echo "======================================"
-    echo " Installation Summary"
-    echo "======================================"
-    echo " Disk     : $DISK"
-    echo " Win Part : ${WINPART:-unknown}"
-    echo " Mode     : $MODE"
-    if [[ "$MODE" == "static" ]]; then
-        echo " IP       : $IPADDR"
-        echo " Mask     : $MASK"
-        echo " Gateway  : $GW"
-        echo " DNS1     : $DNS1"
-        echo " DNS2     : ${DNS2:-}"
-    fi
-    echo " Password : $PASSWORD"
-    echo "======================================"
-    echo
+boot_ram_stage() {
+
+log "Loading RAM kernel..."
+
+apt-get update -y
+apt-get install -y kexec-tools
+
+KERNEL=$(ls /boot/vmlinuz* | head -n1)
+INITRD=$(ls /boot/initrd.img* | head -n1)
+
+kexec -l \$KERNEL \
+--initrd=\$INITRD \
+--command-line="init=/bin/bash"
+
+log "Switching to RAM environment..."
+
+sync
+kexec -e
+
 }
 
-#######################################
-# CLEANUP + REBOOT
-#######################################
-
-finish() {
-    sync
-    umount "$MOUNT_DIR" 2>/dev/null || true
-
-    log "Installation complete. Rebooting..."
-    reboot -f
-}
-
-#######################################
+#####################################
 # MAIN
-#######################################
+#####################################
 
-main() {
-    require_root
-    detect_disk
-
-    if [[ "$MODE" == "static" ]]; then
-        detect_network
-    fi
-
-    prepare_disk
-    write_image
-    mount_windows_partition
-    create_netconfig
-    show_summary
-    finish
-}
-
-main "$@"
+detect_disk
+detect_network
+prepare_stage2
+boot_ram_stage

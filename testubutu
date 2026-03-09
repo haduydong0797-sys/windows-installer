@@ -1,157 +1,118 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO2222.gz"
-WORKDIR="/tmp/winram"
+WORK="/tmp/winram"
 MOUNT="/mnt/win"
 
-log() { echo "[+] $1"; }
+log(){ echo "[+] $*"; }
 
-##################################
-# Detect disk
-##################################
-
-DISK=$(lsblk -dpno NAME,TYPE | awk '$2=="disk"{print $1}' | head -n1)
-
+# -------- Detect disk ----------
+DISK="$(lsblk -dpno NAME,TYPE | awk '$2=="disk"{print $1}' | head -n1)"
+[ -n "$DISK" ] || { echo "No disk found"; exit 1; }
 log "Target disk: $DISK"
 
-##################################
-# Detect network
-##################################
-
+# -------- Detect network -------
 log "Detecting network..."
+ROUTE="$(ip -4 route get 1.1.1.1)"
+IFACE="$(awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' <<<"$ROUTE")"
+GW="$(awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}' <<<"$ROUTE")"
+IPCIDR="$(ip -4 -o addr show dev "$IFACE" scope global | awk '{print $4}' | head -n1)"
+IPADDR="${IPCIDR%/*}"; CIDR="${IPCIDR#*/}"
 
-ROUTE=$(ip -4 route get 1.1.1.1)
-
-IFACE=$(echo $ROUTE | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
-GW=$(echo $ROUTE | awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}')
-
-IPCIDR=$(ip -4 -o addr show dev $IFACE scope global | awk '{print $4}' | head -n1)
-
-IPADDR=${IPCIDR%/*}
-CIDR=${IPCIDR#*/}
-
-cidr_to_mask() {
-
-local cidr=$1
-local mask=""
-local full_octets=$((cidr/8))
-local partial_octet=$((cidr%8))
-
-for ((i=0;i<4;i++)); do
- if [ $i -lt $full_octets ]; then
- mask+=255
- elif [ $i -eq $full_octets ]; then
- mask+=$((256-2**(8-$partial_octet)))
- else
- mask+=0
- fi
- [ $i -lt 3 ] && mask+=.
-done
-
-echo $mask
+cidr_to_mask(){
+  local c=$1 m="" fo=$((c/8)) po=$((c%8))
+  for i in 0 1 2 3; do
+    if (( i < fo )); then m+=255
+    elif (( i == fo && po>0 )); then m+=$((256-2**(8-po)))
+    else m+=0; fi
+    [[ $i -lt 3 ]] && m+=.
+  done; echo "$m"
 }
+MASK="$(cidr_to_mask "$CIDR")"
 
-MASK=$(cidr_to_mask $CIDR)
-
-DNS1=$(grep nameserver /etc/resolv.conf | head -n1 | awk '{print $2}')
+DNS1="$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf || true)"
 [ "$DNS1" = "127.0.0.53" ] && DNS1="8.8.8.8"
+log "IP: $IPADDR  MASK: $MASK  GW: $GW  DNS: $DNS1"
 
-##################################
-# Install kexec
-##################################
-
+# -------- Install tools --------
 log "Installing kexec..."
-
 apt-get update -y
-apt-get install -y kexec-tools
+apt-get install -y kexec-tools busybox-static cpio
 
-##################################
-# Stage2 installer
-##################################
+# -------- Prepare RAM initramfs -
+log "Preparing RAM initramfs..."
+rm -rf "$WORK"; mkdir -p "$WORK"/{bin,sbin,proc,sys,dev,tmp}
 
-mkdir -p $WORKDIR
+# busybox (static) cho môi trường RAM
+cp /bin/busybox "$WORK/bin/"
+ln -s busybox "$WORK/bin/sh"
+ln -s busybox "$WORK/bin/mount"
+ln -s busybox "$WORK/bin/umount"
+ln -s busybox "$WORK/bin/mkdir"
+ln -s busybox "$WORK/bin/echo"
+ln -s busybox "$WORK/bin/sleep"
 
-cat <<EOF > $WORKDIR/stage2.sh
+# stage2 (chạy trong RAM)
+cat > "$WORK/bin/stage2.sh" <<EOF
 #!/bin/sh
-
 echo "[+] RAM installer started"
-
 mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
 
 DISK="$DISK"
+IMG_URL="$IMG_URL"
+MOUNT="$MOUNT"
 
-mkdir -p $MOUNT
+mkdir -p \$MOUNT
 
 echo "[+] Writing Windows image..."
-
-curl -L $IMG_URL | gunzip | dd of=\$DISK bs=16M status=progress
-
+busybox wget -O- \$IMG_URL | busybox gunzip | dd of=\$DISK bs=16M status=progress
 sync
 
 echo "[+] Searching Windows partition..."
-
-for part in \${DISK}*; do
-
- if mount \$part $MOUNT 2>/dev/null; then
-
-  if [ -d "$MOUNT/Windows" ]; then
-
-   echo "[+] Windows partition found"
-
-   cat <<CONF > $MOUNT/netconfig.txt
+for p in \${DISK}*; do
+  mount \$p \$MOUNT 2>/dev/null || continue
+  if [ -d "\$MOUNT/Windows" ]; then
+    echo "[+] Windows partition found"
+    cat <<CONF > \$MOUNT/netconfig.txt
 IP=$IPADDR
 MASK=$MASK
 GW=$GW
 DNS1=$DNS1
 PASS=Admin123!
 CONF
-
-   sync
-   umount $MOUNT
-   break
+    sync
+    umount \$MOUNT
+    break
   fi
-
-  umount $MOUNT
- fi
-
+  umount \$MOUNT
 done
 
-echo "[+] Install complete"
-
+echo "[+] Install complete, rebooting..."
 reboot -f
 EOF
+chmod +x "$WORK/bin/stage2.sh"
 
-chmod +x $WORKDIR/stage2.sh
-
-##################################
-# RAM init
-##################################
-
-cat <<EOF > $WORKDIR/init
+# init của RAM
+cat > "$WORK/init" <<'EOF'
 #!/bin/sh
-exec $WORKDIR/stage2.sh
+exec /bin/stage2.sh
 EOF
+chmod +x "$WORK/init"
 
-chmod +x $WORKDIR/init
+# tạo initramfs
+( cd "$WORK" && find . | cpio -H newc -o ) > /tmp/raminit.cpio
 
-##################################
-# Load kernel
-##################################
-
-KERNEL=$(find /boot -name "vmlinuz*" | head -n1)
-INITRD=$(find /boot -name "initrd.img*" | head -n1)
-
+# -------- Load kernel ----------
+KERNEL="$(find /boot -name 'vmlinuz*' | head -n1)"
 log "Kernel: $KERNEL"
 
-kexec -l $KERNEL \
- --initrd=$INITRD \
- --command-line="init=$WORKDIR/init"
+kexec -l "$KERNEL" \
+  --initrd=/tmp/raminit.cpio \
+  --command-line="console=tty1 init=/init"
 
 sync
-
 log "Booting RAM environment..."
-
 kexec -e

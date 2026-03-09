@@ -146,20 +146,40 @@ chmod +x $WORKDIR/stage2.sh
 # Find kernel
 #####################################
 
+log "Preparing RAM environment..."
+
+mkdir -p /tmp/ramstage
+
+cat <<'EOF' > /tmp/ramstage/init
+#!/bin/sh
+
+echo "[+] RAM stage started"
+
+mount -t proc none /proc
+mount -t sysfs none /sys
+
+/tmp/stage2.sh
+EOF
+
+chmod +x /tmp/ramstage/init
+
+cp $WORKDIR/stage2.sh /tmp/stage2.sh
+
+####################################
+# Load kernel into RAM
+####################################
+
 KERNEL=$(find /boot -name "vmlinuz*" | head -n1)
 INITRD=$(find /boot -name "initrd.img*" | head -n1)
 
-log "Kernel: $KERNEL"
+echo "[+] Kernel: $KERNEL"
 
-#####################################
-# Boot RAM stage
-#####################################
-
-log "Booting RAM environment..."
-
-kexec -l $KERNEL \
- --initrd=$INITRD \
- --command-line="init=/bin/bash"
+kexec -l "$KERNEL" \
+ --initrd="$INITRD" \
+ --command-line="init=/tmp/ramstage/init"
 
 sync
+
+echo "[+] Booting RAM environment..."
+
 kexec -e

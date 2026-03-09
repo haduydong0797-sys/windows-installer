@@ -1,147 +1,202 @@
 #!/usr/bin/env bash
-set -e
+set -eo pipefail
 
-IMG_URL="https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO2222.gz"
-TMP="/dev/shm/winimage.gz"
-MOUNT="/mnt/win"
+IMG_URL="${IMG_URL:-https://dumgzwin.atl1.cdn.digitaloceanspaces.com/winDO2222.gz}"
+RAM_GZ="/dev/shm/windows.gz"
+RAM_SH="/dev/shm/win_stage2.sh"
+MOUNT_DIR="/mnt/win"
+PASSWORD="${PASSWORD:-Admin123!}"
 
-log(){ echo "[+] $*"; }
-
-################################
-# Detect disk
-################################
-
-DISK=$(lsblk -dpno NAME,TYPE | awk '$2=="disk"{print $1}' | head -n1)
-
-if [ -z "$DISK" ]; then
- echo "No disk found!"
- exit 1
-fi
-
-log "Target disk: $DISK"
-
-################################
-# Detect network
-################################
-
-ROUTE=$(ip -4 route get 1.1.1.1)
-
-IFACE=$(echo $ROUTE | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
-GW=$(echo $ROUTE | awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}')
-
-IPCIDR=$(ip -4 -o addr show dev $IFACE scope global | awk '{print $4}' | head -n1)
-
-IPADDR=${IPCIDR%/*}
-CIDR=${IPCIDR#*/}
-
-cidr_to_mask() {
-
-local cidr=$1
-local mask=""
-local full_octets=$((cidr/8))
-local partial_octet=$((cidr%8))
-
-for ((i=0;i<4;i++)); do
- if [ $i -lt $full_octets ]; then
- mask+=255
- elif [ $i -eq $full_octets ]; then
- mask+=$((256-2**(8-$partial_octet)))
- else
- mask+=0
- fi
- [ $i -lt 3 ] && mask+=.
-done
-
-echo $mask
+log() {
+  echo "[+] $*"
 }
 
-MASK=$(cidr_to_mask $CIDR)
+wait_apt() {
+  while fuser /var/lib/apt/lists/lock >/dev/null 2>&1 \
+     || fuser /var/lib/dpkg/lock >/dev/null 2>&1 \
+     || fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+    log "Waiting for apt lock..."
+    sleep 2
+  done
+}
 
-DNS1=$(grep nameserver /etc/resolv.conf | head -n1 | awk '{print $2}')
-[ "$DNS1" = "127.0.0.53" ] && DNS1="8.8.8.8"
+cidr_to_mask() {
+  local cidr="$1"
+  local mask=""
+  local full_octets=$((cidr / 8))
+  local partial_octet=$((cidr % 8))
+  local i
 
-log "IP: $IPADDR"
-log "MASK: $MASK"
-log "GW: $GW"
-log "DNS: $DNS1"
+  for ((i=0; i<4; i++)); do
+    if [ "$i" -lt "$full_octets" ]; then
+      mask+="255"
+    elif [ "$i" -eq "$full_octets" ] && [ "$partial_octet" -gt 0 ]; then
+      mask+=$((256 - 2**(8 - partial_octet)))
+    else
+      mask+="0"
+    fi
+    [ "$i" -lt 3 ] && mask+="."
+  done
 
-################################
-# Download image to RAM
-################################
+  echo "$mask"
+}
 
-log "Downloading Windows image to RAM..."
+detect_disk() {
+  DISK="$(lsblk -dpno NAME,TYPE | awk '$2=="disk"{print $1}' | head -n1)"
+  [ -n "$DISK" ] || { echo "No disk found"; exit 1; }
+  DISK_BASE="$(basename "$DISK")"
+  log "Target disk: $DISK"
+}
 
-wget -O $TMP $IMG_URL
+detect_network() {
+  log "Detecting network..."
 
-################################
-# Stop services
-################################
+  ROUTE="$(ip -4 route get 1.1.1.1)"
+  IFACE="$(awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' <<<"$ROUTE")"
+  GW="$(awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}' <<<"$ROUTE")"
 
-swapoff -a || true
+  IPCIDR="$(ip -4 -o addr show dev "$IFACE" scope global | awk '{print $4}' | head -n1)"
+  IPADDR="${IPCIDR%/*}"
+  CIDR="${IPCIDR#*/}"
+  MASK="$(cidr_to_mask "$CIDR")"
 
-################################
-# Unmount disk
-################################
+  DNS1="$(awk '/^nameserver /{print $2; exit}' /etc/resolv.conf || true)"
+  DNS2="$(awk '/^nameserver /{count++; if(count==2){print $2; exit}}' /etc/resolv.conf || true)"
 
-log "Unmounting partitions..."
+  [ "$DNS1" = "127.0.0.53" ] && DNS1="8.8.8.8"
+  [ -z "$DNS1" ] && DNS1="8.8.8.8"
 
-lsblk -ln $DISK | awk '{print $1}' | while read part; do
- umount "/dev/$part" 2>/dev/null || true
-done
+  log "IP: $IPADDR"
+  log "MASK: $MASK"
+  log "GW: $GW"
+  log "DNS1: $DNS1"
+  log "DNS2: ${DNS2:-<empty>}"
+}
 
-################################
-# Write disk
-################################
+install_tools() {
+  wait_apt
+  log "Installing tools..."
+  apt-get update -y
+  apt-get install -y busybox-static curl wget
+}
 
-log "Writing Windows image..."
+prepare_kernel_modules() {
+  log "Preparing kernel modules..."
+  modprobe ntfs3 2>/dev/null || true
+  modprobe ntfs 2>/dev/null || true
+}
 
-gunzip -c $TMP | dd of=$DISK bs=16M status=progress
+download_to_ram() {
+  log "Downloading Windows image to RAM..."
+  rm -f "$RAM_GZ"
 
-sync
+  if command -v curl >/dev/null 2>&1; then
+    curl -L "$IMG_URL" -o "$RAM_GZ"
+  else
+    wget -O "$RAM_GZ" "$IMG_URL"
+  fi
 
-################################
-# Inject network
-################################
+  [ -s "$RAM_GZ" ] || { echo "Download failed"; exit 1; }
 
-mkdir -p $MOUNT
+  log "Downloaded to $RAM_GZ"
+  ls -lh "$RAM_GZ" || true
+}
 
-sleep 3
-partprobe $DISK || true
+build_stage2() {
+  log "Preparing RAM stage..."
 
-for part in ${DISK}*; do
+  cat > "$RAM_SH" <<EOF
+#!/dev/shm/busybox sh
+set -e
 
- if mount $part $MOUNT 2>/dev/null; then
+BB=/dev/shm/busybox
+DISK="$DISK"
+DISK_BASE="$DISK_BASE"
+RAM_GZ="$RAM_GZ"
+MOUNT_DIR="$MOUNT_DIR"
 
-  if [ -d "$MOUNT/Windows" ]; then
+echo "[+] Stage2 started from RAM"
+echo "[+] Disk: \$DISK"
 
-   log "Windows partition found"
+# Cố gắng giảm ghi thêm vào root hiện tại
+\$BB mount -o remount,ro / 2>/dev/null || true
+\$BB sleep 1
 
-   cat <<EOF > $MOUNT/netconfig.txt
+echo "[+] Writing Windows image to disk..."
+\$BB gunzip -c "\$RAM_GZ" | \$BB dd of="\$DISK" bs=16M status=progress
+
+echo "[+] Disk write completed"
+\$BB sync
+\$BB sleep 3
+
+# Yêu cầu kernel đọc lại partition table
+echo 1 > /sys/class/block/\$DISK_BASE/device/rescan 2>/dev/null || true
+\$BB sleep 3
+
+mkdir -p "\$MOUNT_DIR"
+
+echo "[+] Searching Windows partition..."
+
+for part in /dev/\${DISK_BASE}[0-9]* /dev/\${DISK_BASE}p[0-9]*; do
+  [ -b "\$part" ] || continue
+
+  \$BB mount -t ntfs3 "\$part" "\$MOUNT_DIR" 2>/dev/null || \
+  \$BB mount -t ntfs "\$part" "\$MOUNT_DIR" 2>/dev/null || \
+  continue
+
+  if [ -d "\$MOUNT_DIR/Windows" ]; then
+    echo "[+] Windows partition found: \$part"
+
+    cat > "\$MOUNT_DIR/netconfig.txt" <<CONF
+MODE=static
 IP=$IPADDR
 MASK=$MASK
 GW=$GW
 DNS1=$DNS1
-PASS=Admin123!
-EOF
+DNS2=${DNS2:-}
+PASSWORD=$PASSWORD
+CONF
 
-   sync
-   umount $MOUNT
-   break
-
+    \$BB sync
+    \$BB umount "\$MOUNT_DIR" || true
+    echo "[+] netconfig.txt written"
+    break
   fi
 
-  umount $MOUNT
-
- fi
-
+  \$BB umount "\$MOUNT_DIR" || true
 done
 
-################################
-# Reboot
-################################
-
-log "Installation finished"
-log "Rebooting..."
-
+echo "[+] Forcing reboot..."
 echo 1 > /proc/sys/kernel/sysrq
 echo b > /proc/sysrq-trigger
+EOF
+
+  chmod +x "$RAM_SH"
+}
+
+run_stage2() {
+  log "Stopping swap..."
+  swapoff -a || true
+
+  log "Copying busybox to RAM..."
+  cp /bin/busybox "$RAM_GZ.busybox.tmp" 2>/dev/null || cp /usr/bin/busybox "$RAM_GZ.busybox.tmp"
+  mv "$RAM_GZ.busybox.tmp" /dev/shm/busybox
+  chmod +x /dev/shm/busybox
+
+  log "Handing over to RAM stage..."
+  exec /dev/shm/busybox sh "$RAM_SH"
+}
+
+main() {
+  [ "$(id -u)" = "0" ] || { echo "Run as root"; exit 1; }
+
+  detect_disk
+  detect_network
+  install_tools
+  prepare_kernel_modules
+  download_to_ram
+  build_stage2
+  run_stage2
+}
+
+main "$@"
